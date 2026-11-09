@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Suika Game (Watermelon Game)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
+            touch-action: none; /* Prevent pull-to-refresh and scrolling on mobile */
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+            border-radius: 1rem;
+            overflow: hidden;
+            background-color: #fffae6; /* Soft warm background for the box */
+        }
+        canvas {
+            display: block;
+        }
+        .ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Let clicks pass through to canvas */
+        }
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.5);
+        }
+    </style>
+</head>
+<body class="h-screen w-screen flex items-center justify-center">
+
+    <!-- Main Game Wrapper -->
+    <div class="relative w-full max-w-md mx-auto h-full max-h-[900px] sm:h-[90vh] flex flex-col items-center justify-center p-2 sm:p-4">
+        
+        <!-- Header Info -->
+        <div class="w-full flex justify-between items-end mb-2 px-2 z-10 relative">
+            <div class="glass-panel px-4 py-2 rounded-xl shadow-sm">
+                <p class="text-sm text-gray-500 font-bold uppercase tracking-wider">Score</p>
+                <p id="score-display" class="text-3xl font-black text-orange-500 leading-none">0</p>
+            </div>
+            <div class="glass-panel px-4 py-2 rounded-xl shadow-sm flex flex-col items-center">
+                <p class="text-xs text-gray-500 font-bold uppercase tracking-wider mb-1">Next</p>
+                <div id="next-fruit-display" class="w-12 h-12 flex items-center justify-center text-3xl">
+                    <!-- Next fruit emoji injected here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Canvas Container -->
+        <div id="game-container" class="w-full aspect-[2/3] relative bg-[#ffe4c4] border-4 border-amber-800/20">
+            <canvas id="game-canvas"></canvas>
+            
+            <!-- Game Over Overlay -->
+            <div id="game-over-screen" class="absolute inset-0 bg-black/60 backdrop-blur-sm hidden flex-col items-center justify-center text-white pointer-events-auto transition-opacity duration-300">
+                <h2 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500 mb-2 drop-shadow-lg">GAME OVER</h2>
+                <p class="text-lg mb-6">Final Score: <span id="final-score" class="font-bold text-yellow-300">0</span></p>
+                <button id="restart-btn" class="px-8 py-3 bg-gradient-to-r from-orange-400 to-red-500 rounded-full font-bold text-xl shadow-lg shadow-orange-500/50 hover:scale-105 active:scale-95 transition-all">
+                    Play Again
+                </button>
+            </div>
+        </div>
+
+        <!-- Instructions -->
+        <p class="text-gray-400 text-sm mt-4 text-center">Tap/Click and drag to aim. Release to drop.</p>
+    </div>
+
+    <script>
+        // --- Constants & Configuration ---
+        const FRUITS = [
+            { name: "Cherry", radius: 16, emoji: "🍒", color: "#ff0800", score: 1 },
+            { name: "Strawberry", radius: 24, emoji: "🍓", color: "#ff3366", score: 3 },
+            { name: "Grape", radius: 34, emoji: "🍇", color: "#9932cc", score: 6 },
+            { name: "Dekopon", radius: 44, emoji: "🍊", color: "#ffa500", score: 10 },
+            { name: "Persimmon", radius: 56, emoji: "🍅", color: "#ff4500", score: 15 },
+            { name: "Apple", radius: 70, emoji: "🍎", color: "#dc143c", score: 21 },
+            { name: "Pear", radius: 86, emoji: "🍐", color: "#d1e231", score: 28 },
+            { name: "Peach", radius: 104, emoji: "🍑", color: "#ffb7c5", score: 36 },
+            { name: "Pineapple", radius: 124, emoji: "🍍", color: "#ffd700", score: 45 },
+            { name: "Melon", radius: 146, emoji: "🍈", color: "#98fb98", score: 55 },
+            { name: "Watermelon", radius: 170, emoji: "🍉", color: "#32cd32", score: 66 }
+        ];
+
+        // Canvas / Engine setup
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('game-container');
+        
+        // Logical resolution (internal rendering size)
+        const LOGICAL_WIDTH = 400;
+        const LOGICAL_HEIGHT = 600;
+        const DEATH_LINE_Y = 120; // Y coordinate where fruits trigger game over
+
+        // Matter.js modules
+        const { Engine, World, Bodies, Events, Composite, Body } = Matter;
+        let engine, world;
+        
+        // Game State
+        let score = 0;
+        let currentFruitLevel = 0;
+        let nextFruitLevel = 0;
+        let gameState = 'ready'; // ready, dropping, gameover
+        let dropX = LOGICAL_WIDTH / 2;
+        let effects = [];
+        let gameLoopId;
+        let walls = [];
+        
+        // --- Initialization ---
+        function init() {
+            // Resize canvas to logical size, CSS handles the visual scaling
+            canvas.width = LOGICAL_WIDTH;
+            canvas.height = LOGICAL_HEIGHT;
+            
+            // Setup physics engine
+            engine = Engine.create({
+                positionIterations: 8,
+                velocityIterations: 8,
+                constraintIterations: 4
+            });
+            world = engine.world;
+            
+            // Adjust gravity slightly for a heavier feel
+            engine.gravity.y = 1.2;
+
+            createBoundaries();
+            bindEvents();
+            resetGame();
+            
+            // Start custom render/update loop
+            requestAnimationFrame(gameLoop);
+        }
+
+        function createBoundaries() {
+            const wallOptions = { isStatic: true, friction: 0.3, render: { visible: false } };
+            const groundOptions = { isStatic: true, friction: 0.8, render: { visible: false } };
+            const wallThickness = 100;
+
+            walls = [
+                // Bottom
+                Bodies.rectangle(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT + wallThickness/2, LOGICAL_WIDTH * 2, wallThickness, groundOptions),
+                // Left
+                Bodies.rectangle(-wallThickness/2, LOGICAL_HEIGHT / 2, wallThickness, LOGICAL_HEIGHT * 2, wallOptions),
+                // Right
+                Bodies.rectangle(LOGICAL_WIDTH + wallThickness/2, LOGICAL_HEIGHT / 2, wallThickness, LOGICAL_HEIGHT * 2, wallOptions)
+            ];
+            
+            World.add(world, walls);
+        }
+
+        function resetGame() {
+            // Clear bodies except walls
+            const bodiesToRemove = Composite.allBodies(world).filter(b => !walls.includes(b));
+            World.remove(world, bodiesToRemove);
+            
+            score = 0;
+            updateScoreUI();
+            
+            currentFruitLevel = getRandomStartFruit();
+            nextFruitLevel = getRandomStartFruit();
+            updateNextFruitUI();
+            
+            gameState = 'ready';
+            dropX = LOGICAL_WIDTH / 2;
+            effects = [];
+            
+            document.getElementById('game-over-screen').classList.add('hidden');
+            document.getElementById('game-over-screen').classList.remove('flex');
+        }
+
+        function getRandomStartFruit() {
+            // Usually drops fruits level 0-3
+            return Math.floor(Math.random() * 4);
+        }
+
+        // --- Input Handling ---
+        function bindEvents() {
+            // Mouse events
+            canvas.addEventListener('mousemove', handleMove);
+            canvas.addEventListener('mousedown', handleMove);
+            canvas.addEventListener('mouseup', handleDrop);
+            
+            // Touch events
+            canvas.addEventListener('touchmove', handleMove, { passive: false });
+            canvas.addEventListener('touchstart', handleMove, { passive: false });
+            canvas.addEventListener('touchend', handleDrop);
+            
+            // Restart button
+            document.getElementById('restart-btn').addEventListener('click', resetGame);
+
+            // Collision events
+            Events.on(engine, 'collisionStart', handleCollisions);
+        }
+
+        function getXFromEvent(e) {
+            const rect = canvas.getBoundingClientRect();
+            // Handle both touch and mouse
+            const clientX = e.touches ? (e.touches[0] ? e.touches[0].clientX : e.changedTouches[0].clientX) : e.clientX;
+            
+            // Calculate scale between physical CSS size and logical canvas size
+            const scaleX = LOGICAL_WIDTH / rect.width;
+            
+            let x = (clientX - rect.left) * scaleX;
+            // Clamp X to keep fruit inside walls
+            const radius = FRUITS[currentFruitLevel].radius;
+            return Math.max(radius, Math.min(LOGICAL_WIDTH - radius, x));
+        }
+
+        function handleMove(e) {
+            e.preventDefault(); // prevent scrolling
+            if (gameState !== 'ready') return;
+            dropX = getXFromEvent(e);
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            if (gameState !== 'ready') return;
+            
+            // Drop the fruit
+            spawnFruit(dropX, 50, currentFruitLevel, false);
+            gameState = 'dropping';
+            
+            // Cooldown before next drop
+            setTimeout(() => {
+                if (gameState === 'dropping') {
+                    currentFruitLevel = nextFruitLevel;
+                    nextFruitLevel = getRandomStartFruit();
+                    updateNextFruitUI();
+                    gameState = 'ready';
+                }
+            }, 800);
+        }
+
+        // --- Core Mechanics ---
+        function spawnFruit(x, y, level, isMerge = false) {
+            const fruitData = FRUITS[level];
+            const body = Bodies.circle(x, y, fruitData.radius, {
+                label: `fruit_${level}`,
+                restitution: 0.2, // bounciness
+                friction: 0.1,
+                density: 0.001 * (level + 1), // Heavier as they get bigger
+                isSensor: false
+            });
+            
+            // Add slight randomness to initial velocity for natural settling
+            if (!isMerge) {
+                Body.setVelocity(body, { x: (Math.random() - 0.5) * 2, y: 0 });
+            }
+
+            World.add(world, body);
+            return body;
+        }
+
+        function handleCollisions(event) {
+            const pairs = event.pairs;
+            
+            pairs.forEach(pair => {
+                const bodyA = pair.bodyA;
+                const bodyB = pair.bodyB;
+                
+                // Check if both are fruits and are the same type
+                if (bodyA.label.startsWith('fruit_') && bodyA.label === bodyB.label) {
+                    // Prevent multiple merges in same tick
+                    if (bodyA.isMerging || bodyB.isMerging) return;
+                    
+                    const level = parseInt(bodyA.label.split('_')[1]);
+                    
+                    // If not highest level (Watermelon)
+                    if (level < FRUITS.length - 1) {
+                        bodyA.isMerging = true;
+                        bodyB.isMerging = true;
+                        
+                        const newLevel = level + 1;
+                        // Calculate midpoint for new fruit
+                        const newX = (bodyA.position.x + bodyB.position.x) / 2;
+                        const newY = (bodyA.position.y + bodyB.position.y) / 2;
+                        
+                        // Remove old bodies
+                        World.remove(world, [bodyA, bodyB]);
+                        
+                        // Add new fruit
+                        spawnFruit(newX, newY, newLevel, true);
+                        
+                        // Update Score
+                        score += FRUITS[newLevel].score;
+                        updateScoreUI();
+                        
+                        // Visual effect
+                        createMergeEffect(newX, newY, FRUITS[newLevel].color, FRUITS[newLevel].radius);
+                    }
+                }
+            });
+        }
+
+        function createMergeEffect(x, y, color, radius) {
+            effects.push({
+                x, y, color,
+                currentRadius: radius * 0.5,
+                maxRadius: radius * 1.5,
+                alpha: 1
+            });
+        }
+
+        // --- Game Loop & Rendering ---
+        function checkGameOver() {
+            if (gameState === 'gameover') return;
+            
+            const bodies = Composite.allBodies(world);
+            let isOver = false;
+            
+            for (let body of bodies) {
+                if (body.label.startsWith('fruit_')) {
+                    // If a fruit is resting above the death line and we aren't currently dropping a new one there
+                    if (body.position.y < DEATH_LINE_Y && body.velocity.y < 0.5 && body.velocity.y > -0.5) {
+                        // Needs to be stable to avoid instant game over on bounces
+                        if (!body.dangerTime) {
+                            body.dangerTime = Date.now();
+                        } else if (Date.now() - body.dangerTime > 1500) {
+                            // 1.5 seconds above the line = game over
+                            isOver = true;
+                            break;
+                        }
+                    } else {
+                        body.dangerTime = null;
+                    }
+                }
+            }
+            
+            if (isOver) {
+                gameState = 'gameover';
+                document.getElementById('final-score').innerText = score;
+                document.getElementById('game-over-screen').classList.remove('hidden');
+                document.getElementById('game-over-screen').classList.add('flex');
+            }
+        }
+
+        function gameLoop() {
+            // Update physics
+            Engine.update(engine, 1000 / 60);
+            
+            // Check win/loss state
+            checkGameOver();
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+            
+            // Draw Death Line
+            ctx.setLineDash([10, 10]);
+            ctx.beginPath();
+            ctx.moveTo(0, DEATH_LINE_Y);
+            ctx.lineTo(LOGICAL_WIDTH, DEATH_LINE_Y);
+            ctx.strokeStyle = "rgba(255, 0, 0, 0.4)";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.setLineDash([]); // reset
+            
+            // Draw Dropping Preview Indicator
+            if (gameState === 'ready') {
+                const previewFruit = FRUITS[currentFruitLevel];
+                ctx.save();
+                ctx.globalAlpha = 0.5;
+                drawFruit(dropX, 50, previewFruit.radius, previewFruit.color, previewFruit.emoji, 0);
+                
+                // Draw vertical drop line
+                ctx.beginPath();
+                ctx.moveTo(dropX, 50 + previewFruit.radius);
+                ctx.lineTo(dropX, LOGICAL_HEIGHT);
+                ctx.strokeStyle = "rgba(0,0,0,0.1)";
+                ctx.lineWidth = 2;
+                ctx.setLineDash([5, 5]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.restore();
+            }
+
+            // Draw Physics Bodies
+            const bodies = Composite.allBodies(world);
+            for (let body of bodies) {
+                if (body.label.startsWith('fruit_') && !body.isMerging) {
+                    const level = parseInt(body.label.split('_')[1]);
+                    const fruit = FRUITS[level];
+                    drawFruit(body.position.x, body.position.y, fruit.radius, fruit.color, fruit.emoji, body.angle);
+                }
+            }
+            
+            // Draw Effects
+            drawEffects();
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        function drawFruit(x, y, radius, color, emoji, angle) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            
+            // Draw base circle (shadow/volume)
+            ctx.beginPath();
+            ctx.arc(0, 0, radius, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            
+            // Inner gradient/highlight for 3D feel
+            const grad = ctx.createRadialGradient(-radius*0.3, -radius*0.3, radius*0.1, 0, 0, radius);
+            grad.addColorStop(0, "rgba(255,255,255,0.4)");
+            grad.addColorStop(1, "rgba(0,0,0,0.1)");
+            ctx.fillStyle = grad;
+            ctx.fill();
+            
+            // Draw border
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "rgba(0,0,0,0.2)";
+            ctx.stroke();
+            
+            // Draw Emoji
+            ctx.font = `${radius * 1.1}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(emoji, 0, 0);
+            
+            ctx.restore();
+        }
+
+        function drawEffects() {
+            for (let i = effects.length - 1; i >= 0; i--) {
+                const effect = effects[i];
+                
+                ctx.beginPath();
+                ctx.arc(effect.x, effect.y, effect.currentRadius, 0, Math.PI * 2);
+                ctx.strokeStyle = effect.color;
+                ctx.lineWidth = 4;
+                ctx.globalAlpha = effect.alpha;
+                ctx.stroke();
+                
+                // Update effect
+                effect.currentRadius += 4;
+                effect.alpha -= 0.05;
+                
+                if (effect.alpha <= 0) {
+                    effects.splice(i, 1);
+                }
+            }
+            ctx.globalAlpha = 1; // reset
+        }
+
+        // --- UI Updates ---
+        function updateScoreUI() {
+            // Basic animation by adding a class temporarily
+            const el = document.getElementById('score-display');
+            el.innerText = score;
+            el.classList.add('scale-125');
+            setTimeout(() => el.classList.remove('scale-125'), 150);
+        }
+        
+        function updateNextFruitUI() {
+            document.getElementById('next-fruit-display').innerText = FRUITS[nextFruitLevel].emoji;
+        }
+
+        // Start game when page loads
+        window.onload = init;
+
+    </script>
+</body>
+</html>
